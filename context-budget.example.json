@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "startAtFraction": 0.3,
+  "highWaterFraction": 0.6,
+  "keepRecentSteps": 8,
+  "keepThinkingSteps": 6,
+  "minResultTokens": 600,
+  "batchTokens": 6000,
+  "thinkBatchSteps": 4,
+  "protectLatestReadTokens": 12000,
+  "errorHeadChars": 400,
+  "charsPerToken": 3.3
+}

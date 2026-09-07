@@ -1,0 +1,22 @@
+{
+  "name": "pi-context-budget",
+  "version": "0.1.0",
+  "description": "Pi coding-agent extension that keeps long sessions inside the window a local model works best in: drops old thinking blocks and stubs stale tool outputs, with no LLM calls and nothing paraphrased.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Don-Works/pi-context-budget.git"
+  },
+  "keywords": ["pi-package", "pi", "coding-agent", "context-window", "pruning", "compaction", "vllm"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "node --test plan.test.mjs"
+  },
+  "engines": {
+    "node": ">=23"
+  },
+  "files": ["index.ts", "plan.ts", "replay.ts", "context-budget.example.json", "README.md", "LICENSE"]
+}
