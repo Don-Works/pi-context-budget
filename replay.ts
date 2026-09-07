@@ -16,7 +16,7 @@ const msgs = path.filter((e) => e.type === "message").map((e) => e.message);
 const state = newState();
 let sumBefore = 0, sumAfter = 0, advances = 0, peakBefore = 0, peakAfter = 0, requests = 0;
 const spilled = new Set<string>();
-const spill = (id: string, tool: string, step: number) => { spilled.add(id); return `/spill/${step}-${tool}.txt`; };
+const spill = (key: string, tool: string, step: number) => { spilled.add(key); return `/spill/${step}-${tool}.txt`; };
 for (let i = 0; i < msgs.length; i++) {
   if (msgs[i].role !== "assistant") continue;
   requests++;
@@ -30,7 +30,7 @@ console.log(JSON.stringify({
   file: file.split("/").at(-1)?.slice(0, 19), requests, advances,
   peak_ctx_est: { before: peakBefore, after: peakAfter },
   cumulative_prompt_tokens_k: { before: Math.round(sumBefore / 1000), after: Math.round(sumAfter / 1000) },
-  final: { ctxBefore: last.stats.ctxBefore, ctxAfter: last.stats.ctxAfter, resultsElided: last.stats.resultsElided, thinkingDropped: last.stats.thinkingDropped, spilled: spilled.size },
+  final: { ctxBefore: last.stats.ctxBefore, ctxAfter: last.stats.ctxAfter, resultsElided: last.stats.resultsElided, argsElided: last.stats.argsElided, thinkingDropped: last.stats.thinkingDropped, spilled: spilled.size },
 }, null, 1));
 // show two example stubs
 const stubs = last.messages.filter((m: any) => m.role === "toolResult" && typeof m.content?.[0]?.text === "string" && m.content[0].text.includes("[context-budget]")).slice(0, 2);
