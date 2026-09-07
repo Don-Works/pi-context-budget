@@ -8,6 +8,15 @@
   "batchTokens": 6000,
   "thinkBatchSteps": 4,
   "protectLatestReadTokens": 12000,
-  "errorHeadChars": 400,
-  "charsPerToken": 3.3
+  "stubHeadChars": 400,
+  "stubTailChars": 400,
+  "recallLimitChars": 24000,
+  "charsPerToken": 3.3,
+  "squeeze": false,
+  "pin": false,
+  "interceptCompact": true,
+  "targetFraction": 0.6,
+  "emergencyKeepSteps": 2,
+  "emergencyKeepThinking": 1,
+  "scratchLimitChars": 1500
 }

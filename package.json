@@ -1,7 +1,7 @@
 {
   "name": "pi-context-budget",
-  "version": "0.1.0",
-  "description": "Pi coding-agent extension that keeps long sessions inside the window a local model works best in: drops old thinking blocks and stubs stale tool outputs, with no LLM calls and nothing paraphrased.",
+  "version": "0.2.0",
+  "description": "Pi coding-agent extension that keeps long sessions inside the window a local model works best in: archives old thinking and stale tool outputs as addressable snapshots, with no LLM calls and nothing paraphrased.",
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "repository": {
