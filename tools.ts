@@ -107,15 +107,16 @@ export function registerCtxCommand(pi: ExtensionAPI, host: ToolHost): void {
       const window = usage?.contextWindow ?? host.lastWindow();
       const pct = last ? Math.round((100 * last.ctxAfter) / window) : usage?.percent;
       const counts = Object.values(state.elided).reduce((n, e) => ({ ...n, [e.kind]: (n[e.kind] ?? 0) + 1 }), {} as Record<string, number>);
+      const tiers = Object.values(state.elided).filter((e) => e.kind === "result").reduce((n, e) => ({ ...n, [e.tier ?? "cite"]: (n[e.tier ?? "cite"] ?? 0) + 1 }), {} as Record<string, number>);
       const lines = [
         `context window ${window ?? "?"} · provider-reported ${usage?.tokens ?? "?"} tokens (${usage?.percent?.toFixed(0) ?? "?"}%) · plugin sent ${last ? last.ctxAfter : "?"} est (${pct ?? "?"}%)`,
         last
-          ? `last request: ${last.ctxBefore} est → ${last.ctxAfter} sent · ${last.resultsElided} results · ${last.argsElided} arguments · ${last.thinkingDropped} thinking blocks elided · squeezed ${last.squeezed} · ${last.eligibleWaiting} tokens waiting for next batch`
+          ? `last request: ${last.ctxBefore} est → ${last.ctxAfter} sent · ${last.resultsElided} results (${last.resultsReduced} reduced, ${last.resultsLean} lean) · ${last.argsElided} arguments · ${last.thinkingDropped} thinking blocks elided · squeezed ${last.squeezed} · ${last.eligibleWaiting} tokens waiting for next batch`
           : "no request yet",
         budgetLine(host),
-        `plan generation ${state.gen} · squeeze ${host.budget().cfg.squeeze} · pin ${cfg.pin} · interceptCompact ${cfg.interceptCompact} · thinking kept ${cfg.keepThinkingSteps} · results kept ${cfg.keepRecentSteps}`,
+        `plan generation ${state.gen} · squeeze ${host.budget().cfg.squeeze} · pin ${cfg.pin} · interceptCompact ${cfg.interceptCompact} · thinking kept ${cfg.keepThinkingSteps} · results kept ${cfg.keepRecentSteps} · lean after ${cfg.leanAfterSteps} · search top ${cfg.reduceSearch ? cfg.searchKeepTop : "off"}`,
         cfg.pin ? `pin: ${state.scratch.goal ? state.scratch.goal.slice(0, 120) : "(none)"}` : undefined,
-        `archive ${counts.result ?? 0} results · ${counts.arg ?? 0} arguments · ${counts.thinking ?? 0} thinking · recall with context_budget_recall · spill dir ${sessionDir(sessionId)}`,
+        `archive ${counts.result ?? 0} results (${tiers.cite ?? 0} cited, ${tiers.reduced ?? 0} reduced, ${tiers.lean ?? 0} lean) · ${counts.arg ?? 0} arguments · ${counts.thinking ?? 0} thinking · recall with context_budget_recall · spill dir ${sessionDir(sessionId)}`,
       ].filter((l): l is string => Boolean(l));
       ctx.ui.notify(lines.join("\n"), "info");
     },

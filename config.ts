@@ -7,6 +7,10 @@ export interface Config {
   keepRecentSteps: number;      // tool results/arguments younger than this (assistant steps) are untouched; min 1
   keepThinkingSteps: number;    // thinking kept for this many most recent assistant steps
   minResultTokens: number;      // smaller tool results are never elided
+  leanAfterSteps: number;       // an elided result this many steps old drops to a one-line index entry; 0 disables
+  leanMinTokens: number;        // ...and results this small are left alone even then
+  reduceSearch: boolean;        // reduce tool-search results to top hits + names instead of head/tail
+  searchKeepTop: number;        // hits kept with their description per query block
   argMinTokens: number;         // tool-call string arguments larger than this are archived; 0 disables
   batchTokens: number;          // advance the plan only when >= this many tokens can be elided
   thinkBatchSteps: number;      // ...or when this many thinking blocks became eligible
@@ -32,6 +36,10 @@ export const DEFAULTS: Config = {
   keepRecentSteps: 8,
   keepThinkingSteps: 6,
   minResultTokens: 300,
+  leanAfterSteps: 24,
+  leanMinTokens: 60,
+  reduceSearch: true,
+  searchKeepTop: 3,
   argMinTokens: 150,
   batchTokens: 6000,
   thinkBatchSteps: 4,
@@ -62,6 +70,9 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
   }
   if (raw.stubHeadChars == null && typeof raw.errorHeadChars === "number") merged.stubHeadChars = raw.errorHeadChars;
   merged.keepRecentSteps = Math.max(1, merged.keepRecentSteps);
+  merged.searchKeepTop = Math.max(0, merged.searchKeepTop);
+  merged.leanAfterSteps = Math.max(0, merged.leanAfterSteps);
+  merged.leanMinTokens = Math.max(0, merged.leanMinTokens);
   merged.charsPerToken = merged.charsPerToken > 0 ? merged.charsPerToken : DEFAULTS.charsPerToken;
   return merged;
 }

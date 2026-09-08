@@ -19,8 +19,10 @@ import { registerCtxCommand, registerPin, registerRecall } from "./tools.ts";
 
 const NOTE =
   "\n\n## Context budget\nOlder tool outputs may appear as \"[context-budget] id=cb-…\" citations " +
-  "with a head/tail preview, and large arguments of older tool calls as \"[context-budget] id=ca-…\" " +
-  "citations with a head. Your own text and the user's messages are never altered; older thinking is " +
+  "with a head/tail preview, or as a single \"[context-budget] cb-… <tool> step N … tok archived\" line " +
+  "with no preview at all, or — for a tool search — as the top hits of each query with the remaining " +
+  "matches listed by name only after \"also:\". Large arguments of older tool calls appear as " +
+  "\"[context-budget] id=ca-…\" citations with a head. Your own text and the user's messages are never altered; older thinking is " +
   "archived under th-<hash> and dropped from the prompt (it is re-billed on every resend). Citations " +
   "are snapshots of what was there then. To recover the exact original, call context_budget_recall " +
   "with that id — do not re-run the tool, the world may have changed. Pass list=true for the archive " +

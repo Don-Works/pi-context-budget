@@ -3,6 +3,11 @@ import type { Config } from "./config.ts";
 
 export type Kind = "result" | "thinking" | "arg";
 
+// How a result is rendered in the prompt. Demotion is one-way: reduced/cite -> lean, never back,
+// so the plan keeps its "only ever grows" property and the prefix cannot thrash between tiers.
+// An entry written before 0.6.0 has no tier and reads as "cite".
+export type Tier = "cite" | "reduced" | "lean";
+
 export interface Elided {
   id: string;           // cb-<tail> (result), ca-<tail> (argument) or th-<hash> (thinking); used by the recall tool
   kind: Kind;
@@ -11,6 +16,11 @@ export interface Elided {
   tool: string;         // tool name, "thinking", or "<tool>(<argument>)"
   tokens: number;
   duplicateOf?: string; // archive id of a later call with the same tool and arguments, if any
+  tier?: Tier;          // absent means "cite"
+}
+
+export function tierOf(e: Elided | undefined): Tier | undefined {
+  return e ? e.tier ?? "cite" : undefined;
 }
 
 export type Spill = (key: string, tool: string, step: number, text: string) => string | undefined;
@@ -70,7 +80,8 @@ export function formatCatalog(elided: Record<string, Elided>): string {
     .map((e) => {
       const dup = e.duplicateOf ? ` same-call-as=${e.duplicateOf}` : "";
       const path = e.path ? ` ${e.path}` : "";
-      return `${e.id}\t${e.tool}\tstep ${e.step}\t${e.tokens} tok${dup}${path}`;
+      const tier = e.kind === "result" && e.tier && e.tier !== "cite" ? ` ${e.tier}` : "";
+      return `${e.id}\t${e.tool}\tstep ${e.step}\t${e.tokens} tok${tier}${dup}${path}`;
     });
   return rows.length ? rows.join("\n") : "archive empty";
 }
@@ -118,10 +129,14 @@ export function stubFor(r: CitationInfo, text: string, e: Elided, cfg: Config): 
   return `[context-budget] id=${e.id}  ${r.tool}${r.path ? " " + r.path : ""}  step ${r.step}  ${r.tokens} tokens  ${lines} lines${err}\n${preview}\n${notes.join(" ")}`;
 }
 
-export function argStub(text: string, e: Elided, cfg: Config): string {
+// Named like a result citation on purpose. An anonymous "269 chars archived" in a compacted
+// transcript leaves the model unable to tell what the call did or which file it touched — enough
+// for an agent re-reading its own session to stop recognising its own writes as its own.
+export function argStub(text: string, e: Elided, cfg: Config, filePath?: string): string {
   const head = text.slice(0, cfg.argHeadChars);
   const more = text.length > head.length ? "…" : "";
-  return `[context-budget] id=${e.id}  ${text.length} chars archived. Head: ${head}${more} Recall: context_budget_recall id=${e.id}`;
+  const where = filePath ? ` ${filePath}` : "";
+  return `[context-budget] id=${e.id}  ${e.tool}${where}  step ${e.step}  ${text.length} chars archived. Head: ${head}${more} Recall: context_budget_recall id=${e.id}`;
 }
 
 export const RESULT_MIN_TOKENS_FLOOR = 80; // squeeze never elides anything smaller than this

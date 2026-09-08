@@ -9,12 +9,14 @@ import {
   firstUserText,
   formatCatalog,
   formatPin,
+  getAt,
   headTail,
   isPinMessage,
   mergeConfig,
   newState,
   plan,
   seedScratch,
+  setAt,
   setScratch,
   sliceArchive,
   stripPin,
@@ -121,7 +123,8 @@ test("large tool-call arguments are archived under ca- ids and recallable", () =
   const assistants = messages.filter((m) => m.role === "assistant");
   const a0 = call(assistants[0]).arguments;
   assert.equal(a0.path, "/p/0.ts", "short arguments untouched");
-  assert.match(a0.content, /^\[context-budget\] id=ca-call0 {2}\d+ chars archived\. Head: file0 line 0/);
+  assert.match(a0.content, /^\[context-budget\] id=ca-call0 {2}write\(content\) \/p\/0\.ts {2}step 0 {2}\d+ chars archived\. Head: file0 line 0/,
+    "an archived argument names the call and the file it touched, like a result citation");
   assert.match(a0.content, /context_budget_recall id=ca-call0/);
   assert.ok(a0.content.length < 300);
   assert.equal(call(assistants[11]).arguments.content, big("file11"));
@@ -134,6 +137,52 @@ test("large tool-call arguments are archived under ca- ids and recallable", () =
   // the original session messages were not mutated
   assert.equal(call(session(12, mk)[1]).arguments.content, big("file0"));
   assert.equal(plan(session(12, mk), newState(), { ...DEFAULTS, argMinTokens: 0 }, 40_000, spill).stats.argsElided, 0, "argMinTokens 0 disables");
+});
+
+test("nested tool-call arguments are archived: an edit's oldText/newText, not just top-level strings", () => {
+  // Pi's edit passes edits: [{oldText, newText}]. Walking only the top level left the largest
+  // thing an editing session re-sends in the prompt forever.
+  const mk = (i) => ({
+    name: "edit",
+    args: { path: `/p/${i}.ts`, edits: [{ oldText: big(`old${i}`), newText: big(`new${i}`) }] },
+    text: `Edited /p/${i}.ts`,
+    isError: false,
+  });
+  const state = newState();
+  const spilled = new Map();
+  const capture = (key, tool, step, text) => { spilled.set(key, { tool, step, text }); return `/spill/${step}-${tool}.txt`; };
+  const { messages, stats } = plan(session(12, mk), state, DEFAULTS, 40_000, capture);
+
+  assert.equal(stats.advanced, true);
+  assert.equal(stats.argsElided, 8, "two nested strings per call for steps 0..3");
+
+  const call = (m) => m.content.find((b) => b.type === "toolCall");
+  const assistants = messages.filter((m) => m.role === "assistant");
+  const a0 = call(assistants[0]).arguments;
+  assert.equal(a0.path, "/p/0.ts", "short arguments untouched");
+  assert.equal(a0.edits.length, 1, "structure survives, only the leaf strings are replaced");
+  assert.match(a0.edits[0].oldText, /^\[context-budget\] id=ca-call0 {2}edit\(edits\[0\]\.oldText\) \/p\/0\.ts/);
+  assert.match(a0.edits[0].newText, /^\[context-budget\] id=ca-call0-2 {2}edit\(edits\[0\]\.newText\) \/p\/0\.ts/);
+
+  assert.equal(state.elided["arg:call0:edits[0].oldText"].kind, "arg");
+  assert.equal(spilled.get("arg:call0:edits[0].oldText").text, big("old0"), "the original is recoverable verbatim");
+  assert.equal(spilled.get("arg:call0:edits[0].newText").text, big("new0"));
+
+  const recent = call(assistants[11]).arguments;
+  assert.equal(recent.edits[0].oldText, big("old11"), "recent steps are untouched");
+  // the caller's messages were not mutated
+  assert.equal(call(session(12, mk)[1]).arguments.edits[0].oldText, big("old0"));
+});
+
+test("setAt clones only the containers on the path", () => {
+  const root = { path: "/p/a.ts", edits: [{ oldText: "a" }, { oldText: "b" }], other: { deep: 1 } };
+  const next = setAt(root, ["edits", 0, "oldText"], "STUB");
+  assert.equal(next.edits[0].oldText, "STUB");
+  assert.equal(root.edits[0].oldText, "a", "input is untouched");
+  assert.equal(next.other, root.other, "untouched branches keep identity, so the prefix stays byte-identical");
+  assert.equal(next.edits[1], root.edits[1]);
+  assert.equal(getAt(root, ["edits", 1, "oldText"]), "b");
+  assert.equal(getAt(root, ["edits", 9, "oldText"]), undefined);
 });
 
 test("latest un-superseded read is protected; an edit of the path releases it", () => {
@@ -282,4 +331,161 @@ test("deterministicSummary is an index, not an LLM paraphrase, and stays bounded
   assert.match(text, /cb-call0/);
   assert.match(text, /4 tool snapshots, 6 thinking snapshots/);
   assert.ok(text.length < 8000);
+});
+
+// ---------------------------------------------------------------------------
+// 0.6.0: reduced and lean tiers
+// ---------------------------------------------------------------------------
+
+const searchResult = (queries = ["task create"], hits = 20) =>
+  queries
+    .map((q) =>
+      [
+        `## Results for "${q}" (${hits} tools)`,
+        "### ns",
+        ...Array.from({ length: hits }, (_, i) => `- [${(0.7 - i * 0.02).toFixed(2)}] ns${i}__tool${i} — Does thing ${i} ${"y".repeat(60)}`),
+      ].join("\n"),
+    )
+    .join("\n\n") + '\nUse detail: "full" for TypeScript signatures, or tool: "name" for a single tool.';
+
+const searchAt = (step, text = searchResult()) => (i) =>
+  i === step
+    ? { name: "mcpx_search", args: { queries: ["task create"] }, text }
+    : { name: "bash", args: { command: `cmd${i}` }, text: big(`out${i}`) };
+
+const small = (tag) => Array.from({ length: 8 }, (_, i) => `${tag} line ${i} ${"x".repeat(30)}`).join("\n");
+
+test("a tool-search result keeps its top hits and folds the rest to names", () => {
+  const msgs = session(12, searchAt(2));
+  const state = newState();
+  const { messages, stats } = plan(msgs, state, DEFAULTS, 40_000, spill);
+  const text = resultText(messages.filter((m) => m.role === "toolResult")[2]);
+  assert.equal(state.elided.call2.tier, "reduced");
+  assert.equal(stats.resultsReduced, 1);
+  // searchKeepTop 3: the first three hits keep their description, the rest keep only a name.
+  assert.match(text, /ns0__tool0 — Does thing 0/);
+  assert.match(text, /ns2__tool2 — Does thing 2/);
+  assert.doesNotMatch(text, /ns9__tool9 — Does thing 9/);
+  assert.match(text, /also: .*\bns9__tool9\b/);
+  assert.match(text, /ns19__tool19/);              // the last hit is still named
+  assert.match(text, /context_budget_recall id=cb-call2/);
+});
+
+test("a reduced result is snapshotted in full, and the reduction is a pure function of the text", () => {
+  const seen = new Map();
+  const capture = (id, tool, step, text) => { seen.set(id, text); return `/spill/${step}.txt`; };
+  const original = searchResult(["a", "b"], 12);
+  const msgs = session(12, searchAt(2, original));
+  const state = newState();
+  const first = plan(msgs, state, DEFAULTS, 40_000, capture);
+  assert.equal(seen.get("call2"), original);       // the archive holds every hit, not the reduction
+  // Replanning the same messages against the frozen state produces the same bytes.
+  const second = plan(msgs, state, DEFAULTS, 40_000, capture);
+  assert.equal(JSON.stringify(second.messages), JSON.stringify(first.messages));
+  assert.equal(second.stats.advanced, false);
+});
+
+test("the latest assistant step is never reduced either", () => {
+  const msgs = session(12, searchAt(11));
+  const state = newState();
+  const { messages } = plan(msgs, state, DEFAULTS, 40_000, spill);
+  assert.equal(state.elided.call11, undefined);
+  assert.match(resultText(messages.filter((m) => m.role === "toolResult")[11]), /ns9__tool9 — Does thing 9/);
+});
+
+test("an old citation nobody recalled drops to a one-line index entry", () => {
+  const msgs = session(40);
+  const state = newState();
+  const { messages, stats } = plan(msgs, state, DEFAULTS, 60_000, spill);
+  const results = messages.filter((m) => m.role === "toolResult");
+  // 40 steps: leanAfterSteps 24 covers 0..15, keepRecentSteps 8 cites 16..31, 32..39 untouched.
+  assert.equal(state.elided.call0.tier, "lean");
+  assert.equal(state.elided.call20.tier, "cite");
+  assert.equal(state.elided.call39, undefined);
+  assert.match(resultText(results[0]), /^\[context-budget\] cb-call0 {2}bash {2}step 0 {2}\d+ tok archived; recall by id\./);
+  assert.doesNotMatch(resultText(results[0]), /Head:/);
+  assert.match(resultText(results[20]), /Head:/);
+  assert.ok(stats.resultsLean >= 15, `expected 15+ lean, got ${stats.resultsLean}`);
+  // A lean line is much cheaper than the citation it replaces.
+  assert.ok(resultText(results[0]).length * 3 < resultText(results[20]).length);
+});
+
+test("a result the model recalled keeps its citation instead of dropping to a lean line", () => {
+  const msgs = session(40);
+  // The model asks for step 0's snapshot back at step 39.
+  msgs.splice(msgs.length - 2, 0, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recall1", name: "context_budget_recall", arguments: { id: "cb-call0" } }],
+  });
+  const state = newState();
+  const { messages } = plan(msgs, state, DEFAULTS, 60_000, spill);
+  assert.equal(state.elided.call0.tier, "cite");
+  assert.equal(state.elided.call1.tier, "lean");
+  assert.match(resultText(messages.filter((m) => m.role === "toolResult")[0]), /Head:/);
+});
+
+test("results under minResultTokens are leaned once old, and errors keep their tail", () => {
+  const msgs = session(40, (i) => ({
+    name: "bash",
+    args: { command: `cmd${i}` },
+    text: small(`out${i}`),               // ~100 tokens: never citation-eligible
+    isError: i === 3,
+  }));
+  const state = newState();
+  const { messages } = plan(msgs, state, DEFAULTS, 6_000, spill);
+  assert.equal(state.elided.call0.tier, "lean");
+  assert.equal(state.elided.call3, undefined);      // the error is left alone
+  const results = messages.filter((m) => m.role === "toolResult");
+  assert.match(resultText(results[0]), /tok archived; recall by id/);
+  assert.match(resultText(results[3]), /out3 line 7/);
+});
+
+test("tiers only ever demote: a lean entry is never promoted back to a citation", () => {
+  const state = newState();
+  plan(session(40), state, DEFAULTS, 60_000, spill);
+  assert.equal(state.elided.call0.tier, "lean");
+  const roundTripped = JSON.parse(JSON.stringify(state));
+  // Replay against a config whose thresholds would otherwise pick "cite" for this result.
+  const cfg = { ...DEFAULTS, leanAfterSteps: 1000 };
+  const { messages } = plan(session(40), roundTripped, cfg, 60_000, spill);
+  assert.equal(roundTripped.elided.call0.tier, "lean");
+  assert.match(resultText(messages.filter((m) => m.role === "toolResult")[0]), /tok archived; recall by id/);
+});
+
+test("loadState carries the tier across a restart", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "ctxb-"));
+  const { loadState, sessionDir } = await import("./store.ts");
+  mkdirSync(sessionDir("s1"), { recursive: true });
+  writeFileSync(join(sessionDir("s1"), "state.json"), JSON.stringify({
+    gen: 3,
+    elided: {
+      a: { id: "cb-a", kind: "result", step: 1, tool: "bash", tokens: 900, tier: "lean" },
+      b: { id: "cb-b", kind: "result", step: 2, tool: "bash", tokens: 900, tier: "reduced" },
+      c: { id: "cb-c", kind: "result", step: 3, tool: "bash", tokens: 900 },
+      d: { id: "cb-d", kind: "result", step: 4, tool: "bash", tokens: 900, tier: "nonsense" },
+    },
+  }));
+  const state = loadState("s1");
+  assert.equal(state.elided.a.tier, "lean");
+  assert.equal(state.elided.b.tier, "reduced");
+  assert.equal(state.elided.c.tier, undefined);     // pre-0.6 entry reads as "cite"
+  assert.equal(state.elided.d.tier, undefined);     // an unknown tier is not trusted
+});
+
+test("the new tier keys are clamped, and turning both off restores the citation-only plan", () => {
+  const cfg = mergeConfig({ leanAfterSteps: -5, leanMinTokens: -1, searchKeepTop: -2 });
+  assert.equal(cfg.leanAfterSteps, 0);
+  assert.equal(cfg.leanMinTokens, 0);
+  assert.equal(cfg.searchKeepTop, 0);
+
+  const off = { ...DEFAULTS, leanAfterSteps: 0, reduceSearch: false };
+  const state = newState();
+  const { messages, stats } = plan(session(40), state, off, 60_000, spill);
+  assert.equal(stats.resultsLean, 0);
+  assert.equal(stats.resultsReduced, 0);
+  assert.ok(stats.resultsElided > 0);
+  assert.match(resultText(messages.filter((m) => m.role === "toolResult")[0]), /Head:/);
 });

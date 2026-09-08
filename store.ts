@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { piCompactionFrom, type PiCompaction } from "./budget.ts";
 import { DEFAULTS, mergeConfig, type Config } from "./config.ts";
-import type { Elided, Kind, Spill } from "./archive.ts";
+import type { Elided, Kind, Spill, Tier } from "./archive.ts";
 import { emptyScratch } from "./pin.ts";
 import { newState, type PlanState } from "./plan.ts";
 
@@ -54,7 +54,15 @@ function kindFor(key: string, e: Partial<Elided>): Kind {
   return key.startsWith("think:") ? "thinking" : key.startsWith("arg:") ? "arg" : "result";
 }
 
-// Reads 0.2 state too: entries gain a kind, the positional thinkCut is dropped (thinking is now keyed by content).
+// A tier has to survive a Pi restart. Losing it would read a lean entry back as a citation,
+// which is a promotion — the one direction the tiers must never move, since it would rewrite
+// the prompt back to a larger form and move the prefix-cache miss point for nothing.
+function tierFor(e: Partial<Elided>): Tier | undefined {
+  return e.tier === "cite" || e.tier === "reduced" || e.tier === "lean" ? e.tier : undefined;
+}
+
+// Reads 0.2 state too: entries gain a kind, the positional thinkCut is dropped (thinking is now keyed by
+// content), and a pre-0.6 entry with no tier reads as "cite".
 export function loadState(sessionId: string): PlanState {
   try {
     const p = statePath(sessionId);
@@ -63,7 +71,7 @@ export function loadState(sessionId: string): PlanState {
       const elided: Record<string, Elided> = {};
       for (const [k, e] of Object.entries(raw.elided ?? {})) {
         if (!e || typeof e.id !== "string") continue;
-        elided[k] = { id: e.id, kind: kindFor(k, e), path: e.path, step: e.step ?? 0, tool: e.tool ?? "tool", tokens: e.tokens ?? 0, duplicateOf: e.duplicateOf };
+        elided[k] = { id: e.id, kind: kindFor(k, e), path: e.path, step: e.step ?? 0, tool: e.tool ?? "tool", tokens: e.tokens ?? 0, duplicateOf: e.duplicateOf, tier: tierFor(e) };
       }
       return { elided, gen: raw.gen ?? 0, scratch: raw.scratch ?? emptyScratch() };
     }

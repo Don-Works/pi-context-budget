@@ -31,10 +31,13 @@ the token cap and the summary is incomplete`. The session keeps growing.
 
 Replaying two recorded sessions through the planner at a 100k window:
 
-| session | requests | peak prompt before | peak after | cumulative prefill | plan advances |
-|---|---|---|---|---|---|
-| 252-step tooling session | 252 | 321k | 100k | 49.7M → 14.7M | 140 |
-| 197-step app session | 197 | 252k | 86k | 28.0M → 9.5M | 91 |
+| session | window | peak prompt | cumulative prefill | plan advances |
+|---|---|---|---|---|
+| 288 requests | 131072 | 86k → 57k | 13.6M → 10.0M | 47 → 37 |
+| 324 requests | 131072 | 121k → 81k | 21.2M → 14.9M | 108 → 39 |
+| 288 requests | 32768 | 77k → 48k | 9.8M → 6.1M | 246 → 220 |
+
+(against no pruning at all, the same 288-request session peaks at 321k.)
 
 The default target is 60% of the window, so Pi's summarizer should rarely
 need to run. If it does, this extension supplies a deterministic index
@@ -63,6 +66,25 @@ never touches the session file):
    compiler and stack-trace needles usually sit. A repeated call with the
    same tool and arguments marks the older citation as the same call as the
    later one.
+   Results have three tiers and only ever move downwards, so the prompt never
+   thrashes between forms:
+   - **`reduced`** — a projection of the result's own structure rather than a
+     window onto its text. A tool-search result keeps the top `searchKeepTop`
+     hits of each query with their descriptions and lists the rest by name
+     after `also:`; the `## Code API` signature dump is dropped. Because this
+     is the same list and not a summary of it, it does not wait for
+     `keepRecentSteps` — one step of age is enough.
+   - **`cite`** — the head/tail citation above. The default for unstructured
+     output.
+   - **`lean`** — one index line, no preview, once a result is
+     `leanAfterSteps` old and nothing has recalled it:
+     `[context-budget] cb-a1b2c3d4  bash  step 41  1243 tok archived; recall
+     by id.` The call it answers is still beside it in the prompt, which for a
+     shell result is the command itself. A result the model passed to
+     `context_budget_recall` keeps its citation instead. The lean line also
+     pays for itself below `minResultTokens`, which a citation never did, so
+     old results above `leanMinTokens` are leaned whether or not they were
+     ever citation-eligible.
 3. **Tool-call arguments** older than `keepRecentSteps` and larger than
    `argMinTokens` are archived under `ca-<id>` and replaced inside the call
    with a one-line citation and a short head. The rest of the assistant
@@ -146,10 +168,10 @@ settings keep the layers out of each other's way: `keepRecentTokens` below
 ## Install
 
 ```bash
-pi install git:github.com/Don-Works/pi-context-budget@v0.4.0
+pi install git:github.com/Don-Works/pi-context-budget@v0.6.0
 ```
 
-or for one project: `pi install -l git:github.com/Don-Works/pi-context-budget@v0.4.0`.
+or for one project: `pi install -l git:github.com/Don-Works/pi-context-budget@v0.6.0`.
 It needs nothing beyond Pi itself; the tests and replay harness use Node 23+
 for built-in TypeScript type stripping.
 
@@ -171,7 +193,11 @@ back to the default.
 | `targetFraction` | 0.6 | squeeze target (only when `squeeze` is true) |
 | `keepRecentSteps` | 8 | results and arguments younger than this many assistant steps are untouched (minimum 1) |
 | `keepThinkingSteps` | 6 | thinking kept for this many most recent steps |
-| `minResultTokens` | 300 | smaller results are never elided |
+| `minResultTokens` | 300 | smaller results are never cited (they can still be leaned) |
+| `leanAfterSteps` | 24 | an un-recalled result this many steps old drops to a one-line index entry; 0 disables |
+| `leanMinTokens` | 60 | ...and results this small are left alone even then |
+| `reduceSearch` | true | reduce tool-search results to their top hits plus names |
+| `searchKeepTop` | 3 | hits kept with their description, per query block |
 | `argMinTokens` | 150 | smaller tool-call arguments are never elided; 0 disables argument archiving |
 | `batchTokens` | 6000 | advance only when this much can be elided at once |
 | `thinkBatchSteps` | 4 | or when this many thinking blocks became eligible |
@@ -191,6 +217,29 @@ points for retained thinking history, so keep it at 6 or above unless the
 window is very small. Dropped thinking is still in the archive.
 
 An older `errorHeadChars` key is still read as `stubHeadChars`.
+
+## Measure
+
+`replay.ts` runs a recorded session through the planner request by request and
+reports peak context, cumulative prefill and plan advances.
+`CONTEXT_BUDGET_REPLAY_CFG` overrides any config key, so one session can be
+replayed under two settings and the difference read off directly:
+
+```bash
+node replay.ts ~/.pi/agent/sessions/<project>/<session>.jsonl 32768
+CONTEXT_BUDGET_REPLAY_CFG='{"leanAfterSteps":0,"reduceSearch":false}' \
+  node replay.ts ~/.pi/agent/sessions/<project>/<session>.jsonl 32768
+```
+
+`search-hitrate.ts` answers the question `reduceSearch` exists for: of the tools
+a tool-search result listed, how many were ever invoked afterwards? On the
+author's sessions it is 5.7%, and hits at rank 7 or worse are used 3.2% of the
+time. Run it before and after changing a gateway's default result count — a
+drop in "listed" with a flat "invoked" is the change working.
+
+```bash
+node search-hitrate.ts               # defaults to ~/.pi/agent/sessions
+```
 
 ## Observe
 

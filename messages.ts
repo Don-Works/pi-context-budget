@@ -72,7 +72,9 @@ export interface ArgInfo {
   bi: number;        // block index inside the assistant message
   key: string;       // arg:<toolCallId>:<name>
   callId: string;
-  name: string;
+  name: string;      // access path: "content", or "edits[0].oldText" when nested
+  segs: (string | number)[]; // the same path, resolved
+  filePath?: string; // the call's target file, when it names one
   tool: string;
   step: number;
   tokens: number;
@@ -137,16 +139,64 @@ function indexCalls(m: Msg, idx: number, step: number, cfg: Config, calls: Map<s
   m.content.forEach((b, bi) => {
     if (b.type !== "toolCall" || !b.id) return;
     const name = b.name ?? "tool";
-    calls.set(b.id, { step, path: pathArg(b.arguments), name, sig: callSig(name, b.arguments) });
+    const filePath = pathArg(b.arguments);
+    calls.set(b.id, { step, path: filePath, name, sig: callSig(name, b.arguments) });
     if (!(cfg.argMinTokens > 0) || !b.arguments || typeof b.arguments !== "object") return;
+    const leaves: { segs: (string | number)[]; text: string }[] = [];
+    stringLeaves(b.arguments, [], 0, leaves);
     let ordinal = 0;
-    for (const [k, v] of Object.entries(b.arguments)) {
-      if (typeof v !== "string") continue;
-      const tokens = estimate(v, cfg);
+    for (const leaf of leaves) {
+      const tokens = estimate(leaf.text, cfg);
       if (tokens <= cfg.argMinTokens) continue;
-      args.push({ idx, bi, key: argKey(b.id, k), callId: b.id, name: k, tool: name, step, tokens, ordinal: ordinal++ });
+      const path = argPathName(leaf.segs);
+      args.push({ idx, bi, key: argKey(b.id, path), callId: b.id, name: path, segs: leaf.segs, filePath, tool: name, step, tokens, ordinal: ordinal++ });
     }
   });
+}
+
+// The biggest thing an editing session re-sends is not a top-level string: Pi's `edit` passes
+// edits: [{oldText, newText}], and only walking the top level left every one of them in the
+// prompt forever. Collect string leaves instead, bounded in depth so a pathological argument
+// cannot make indexing quadratic.
+const MAX_ARG_DEPTH = 4;
+
+function stringLeaves(value: unknown, segs: (string | number)[], depth: number, out: { segs: (string | number)[]; text: string }[]): void {
+  if (typeof value === "string") {
+    if (segs.length) out.push({ segs, text: value });
+    return;
+  }
+  if (depth >= MAX_ARG_DEPTH || value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => stringLeaves(v, [...segs, i], depth + 1, out));
+    return;
+  }
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) stringLeaves(v, [...segs, k], depth + 1, out);
+}
+
+export function argPathName(segs: (string | number)[]): string {
+  return segs.map((s, i) => (typeof s === "number" ? `[${s}]` : i === 0 ? s : `.${s}`)).join("");
+}
+
+export function getAt(root: unknown, segs: (string | number)[]): unknown {
+  let cur: unknown = root;
+  for (const s of segs) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string | number, unknown>)[s];
+  }
+  return cur;
+}
+
+// Immutable set: clones only the containers along the path, so untouched arguments keep their
+// identity and the serialized prefix stays byte-identical where nothing was elided.
+export function setAt<T>(root: T, segs: (string | number)[], value: unknown): T {
+  if (!segs.length) return value as T;
+  const [head, ...rest] = segs;
+  const src = root as unknown;
+  const clone: Record<string | number, unknown> = Array.isArray(src)
+    ? ([...(src as unknown[])] as unknown as Record<string | number, unknown>)
+    : { ...((src ?? {}) as Record<string | number, unknown>) };
+  clone[head] = setAt(clone[head], rest, value);
+  return clone as unknown as T;
 }
 
 export function latestBySig(results: ResultInfo[]): Map<string, string> {
@@ -181,9 +231,24 @@ export function protectedReads(messages: Msg[], results: ResultInfo[], cfg: Conf
   return keep;
 }
 
+// Archive ids the model has asked back. A recalled citation is never demoted to a one-line
+// index entry: asking for the snapshot is the model saying it still wants that content.
+export function recalledIds(messages: Msg[]): Set<string> {
+  const out = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (b.type !== "toolCall" || b.name !== "context_budget_recall") continue;
+      const id = b.arguments?.id;
+      if (typeof id === "string") out.add(id);
+    }
+  }
+  return out;
+}
+
 export function argText(messages: Msg[], a: ArgInfo): string {
   const b = (messages[a.idx].content as Block[])[a.bi];
-  const v = b?.arguments?.[a.name];
+  const v = getAt(b?.arguments, a.segs);
   return typeof v === "string" ? v : "";
 }
 
