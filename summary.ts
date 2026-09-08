@@ -28,7 +28,7 @@ export function deterministicSummary(input: CompactInput, state: SummaryState, _
   const archived = Object.values(state.elided).sort((a, b) => a.step - b.step || a.id.localeCompare(b.id));
   const toolRows = archived.filter((e) => e.kind !== "thinking");
   const thinkN = archived.length - toolRows.length;
-  const goal = state.scratch.goal || users[0] || "(not captured)";
+  const goal = state.scratch.goal || goalOf(input.previousSummary) || users[0] || "(not captured)";
   const lines: string[] = [
     "## Goal", goal, "",
     "## Constraints & Preferences", state.scratch.notes || "- (none pinned)", "",
@@ -54,6 +54,13 @@ export function deterministicSummary(input: CompactInput, state: SummaryState, _
   lines.push(...archiveSection(toolRows), ...fileSection("read-files", read), ...fileSection("modified-files", modified));
   const text = lines.join("\n");
   return text.length <= CAP ? text : text.slice(0, CAP) + "\n… (index truncated)";
+}
+
+// After the first compaction the opening ask is no longer in the span being summarized, only in
+// the summary that compaction wrote. Without this every later index says "(not captured)".
+function goalOf(previous: string | undefined): string {
+  const goal = previous ? (/^## Goal\n(.+)$/m.exec(previous)?.[1] ?? "").trim() : "";
+  return goal === "(not captured)" ? "" : goal;
 }
 
 function userAsks(input: CompactInput): string[] {

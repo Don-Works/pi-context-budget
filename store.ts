@@ -1,22 +1,44 @@
-// Filesystem side: config file, per-session state.json, spill snapshots.
+// Filesystem side: config file, Pi's own compaction settings, per-session state.json, spill snapshots.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { piCompactionFrom, type PiCompaction } from "./budget.ts";
 import { DEFAULTS, mergeConfig, type Config } from "./config.ts";
 import type { Elided, Kind, Spill } from "./archive.ts";
 import { emptyScratch } from "./pin.ts";
 import { newState, type PlanState } from "./plan.ts";
 
-export const SPILL_ROOT = join(homedir(), ".pi", "agent", "context-budget");
+// Same resolution as Pi's getAgentDir().
+export function agentDir(): string {
+  const env = process.env.PI_CODING_AGENT_DIR;
+  if (!env) return join(homedir(), ".pi", "agent");
+  return env === "~" || env.startsWith("~/") ? join(homedir(), env.slice(1)) : env;
+}
 
-export function loadConfig(): Config {
-  const path = process.env.CONTEXT_BUDGET_CONFIG ?? join(homedir(), ".pi", "agent", "context-budget.json");
+export const SPILL_ROOT = join(agentDir(), "context-budget");
+
+function readJson(path: string): Record<string, unknown> | undefined {
   try {
-    if (existsSync(path)) return mergeConfig(JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>);
+    if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   } catch (err) {
     console.error(`context-budget: ignoring ${path}: ${err instanceof Error ? err.message : err}`);
   }
-  return { ...DEFAULTS };
+  return undefined;
+}
+
+export function loadConfig(): Config {
+  const path = process.env.CONTEXT_BUDGET_CONFIG ?? join(agentDir(), "context-budget.json");
+  const raw = readJson(path);
+  return raw ? mergeConfig(raw) : { ...DEFAULTS };
+}
+
+// Pi's compaction block: global settings.json with the project's .pi/settings.json merged over it,
+// the same precedence Pi's SettingsManager applies.
+export function loadPiCompaction(cwd?: string): PiCompaction {
+  const globals = readJson(join(agentDir(), "settings.json"))?.compaction;
+  const project = cwd ? readJson(join(cwd, ".pi", "settings.json"))?.compaction : undefined;
+  const merged = { ...(globals as object | undefined), ...(project as object | undefined) };
+  return piCompactionFrom({ compaction: merged });
 }
 
 export function sessionDir(sessionId: string): string {

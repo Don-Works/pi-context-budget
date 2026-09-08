@@ -1,6 +1,7 @@
 // The two tools and the /ctx command. Everything here reads state through the host callbacks.
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Budget } from "./budget.ts";
 import type { Config } from "./config.ts";
 import { findElided, formatCatalog, sliceArchive } from "./archive.ts";
 import { formatPin, setScratch } from "./pin.ts";
@@ -13,6 +14,7 @@ export interface ToolHost {
   sessionIdOf(ctx: { sessionManager?: { getSessionId?: () => string } } | undefined): string | undefined;
   last(): Stats | undefined;
   lastWindow(): number;
+  budget(): Budget;
 }
 
 export function registerRecall(pi: ExtensionAPI, host: ToolHost): void {
@@ -84,6 +86,15 @@ export function registerPin(pi: ExtensionAPI, host: ToolHost): void {
   });
 }
 
+// Pi compacts above `trigger`; the plan aims to stay under `cap`. When Pi's threshold is the lower
+// of the two the configured target is unreachable, so the cap is pulled under it and squeeze is on.
+function budgetLine(host: ToolHost): string {
+  const b = host.budget();
+  const trigger = Number.isFinite(b.trigger) ? `${b.trigger}` : "off";
+  return `plan cap ${Math.round(b.cap)} tokens (${Math.round((100 * b.cap) / (host.lastWindow() || 1))}%) · Pi compacts above ${trigger}` +
+    (b.clamped ? " · cap clamped under Pi's threshold, squeeze forced on" : "");
+}
+
 export function registerCtxCommand(pi: ExtensionAPI, host: ToolHost): void {
   const { cfg } = host;
   pi.registerCommand("ctx", {
@@ -101,7 +112,8 @@ export function registerCtxCommand(pi: ExtensionAPI, host: ToolHost): void {
         last
           ? `last request: ${last.ctxBefore} est → ${last.ctxAfter} sent · ${last.resultsElided} results · ${last.argsElided} arguments · ${last.thinkingDropped} thinking blocks elided · squeezed ${last.squeezed} · ${last.eligibleWaiting} tokens waiting for next batch`
           : "no request yet",
-        `plan generation ${state.gen} · squeeze ${cfg.squeeze} · pin ${cfg.pin} · interceptCompact ${cfg.interceptCompact} · thinking kept ${cfg.keepThinkingSteps} · results kept ${cfg.keepRecentSteps}`,
+        budgetLine(host),
+        `plan generation ${state.gen} · squeeze ${host.budget().cfg.squeeze} · pin ${cfg.pin} · interceptCompact ${cfg.interceptCompact} · thinking kept ${cfg.keepThinkingSteps} · results kept ${cfg.keepRecentSteps}`,
         cfg.pin ? `pin: ${state.scratch.goal ? state.scratch.goal.slice(0, 120) : "(none)"}` : undefined,
         `archive ${counts.result ?? 0} results · ${counts.arg ?? 0} arguments · ${counts.thinking ?? 0} thinking · recall with context_budget_recall · spill dir ${sessionDir(sessionId)}`,
       ].filter((l): l is string => Boolean(l));

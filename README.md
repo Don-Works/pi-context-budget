@@ -107,13 +107,49 @@ the archive.
 Not elided: user messages, assistant text, results that carry an image,
 `!` shell output, and anything in the latest step.
 
+## Pi's own compaction thresholds
+
+Pi compacts when the prompt passes `contextWindow - reserveTokens`, and its cut
+point keeps `keepRecentTokens` of the tail. Both live in the `compaction` block
+of `~/.pi/agent/settings.json`: global settings, the same numbers for every
+model, with no per-model override.
+
+- On a 262144-token window the default 16384 reserve puts the threshold at 94%
+  of the window, above the 60% target, and the two never meet.
+- On a 32768-token model the same reserve puts it at 50%, below the target. Pi
+  then compacts on every request however well the plan is doing.
+- When `keepRecentTokens` is larger than what the window holds, the cut keeps
+  the whole branch: the compaction frees a few hundred tokens, and the next
+  request compacts again. Observed on a 4B model at 32768 with
+  `keepRecentTokens: 32000` — three compactions in 117 seconds, each dropping
+  about ten of 136 entries.
+
+The extension reads that block (a project `.pi/settings.json` merged over the
+global file) and, for the window in use:
+
+1. Pulls its cap under Pi's threshold when the configured `targetFraction` sits
+   above it, and turns `squeeze` on so the cap is enforced. Where the target
+   already fits, the configured values are used unchanged and nothing is
+   rewritten.
+2. Resizes the compaction cut when Pi's own would free less than the compaction
+   has to free, choosing a cut point by Pi's rule: any context-visible message
+   except a tool result, which stays with the call it answers.
+3. Cancels a threshold compaction that still cannot get under the threshold,
+   instead of writing an index entry every turn. Manual and overflow
+   compactions always run — overflow is the turn that already failed for size.
+
+`/ctx` prints the cap, Pi's threshold, and whether the cap was clamped. Two
+settings keep the layers out of each other's way: `keepRecentTokens` below
+`contextWindow - reserveTokens` for the *smallest* model you run, and
+`reserveTokens` no more than about a quarter of that window.
+
 ## Install
 
 ```bash
-pi install git:github.com/Don-Works/pi-context-budget@v0.3.0
+pi install git:github.com/Don-Works/pi-context-budget@v0.4.0
 ```
 
-or for one project: `pi install -l git:github.com/Don-Works/pi-context-budget@v0.3.0`.
+or for one project: `pi install -l git:github.com/Don-Works/pi-context-budget@v0.4.0`.
 It needs nothing beyond Pi itself; the tests and replay harness use Node 23+
 for built-in TypeScript type stripping.
 
@@ -158,24 +194,28 @@ An older `errorHeadChars` key is still read as `stubHeadChars`.
 
 ## Observe
 
-- `/ctx` prints the provider-reported usage, plugin-sent estimate vs the 60%
-  target, the pin, the plan generation, archive counts by kind and the spill
-  directory.
+- `/ctx` prints the provider-reported usage, plugin-sent estimate vs the cap,
+  the cap against Pi's compaction threshold, the pin, the plan generation,
+  archive counts by kind and the spill directory.
 - The footer shows `ctx 48% −Nk gG` once something is elided (`G` is the plan
   generation; each increment moved the prefix-cache miss point once).
 - `CONTEXT_BUDGET_LOG=<file>` appends one JSON line per request with
   `ctxBefore`, `ctxAfter`, `advanced`, `squeezed`, `resultsElided`,
-  `argsElided`, `thinkingDropped` and the list of archived items.
+  `argsElided`, `thinkingDropped`, the resolved `cap` / `trigger` / `clamped`,
+  and the list of archived items.
 
 ## Replay a recorded session
 
 ```bash
 node replay.ts ~/.pi/agent/sessions/<dir>/<session>.jsonl 100000
+node replay.ts <session>.jsonl 32768 8192 3400   # window, Pi reserve, system-prompt tokens
 ```
 
 Runs the shipped planner request by request over the session's active branch
-and prints peak and cumulative prompt tokens before and after, the number of
-plan advances and two sample citations.
+and prints the resolved budget, peak and cumulative prompt tokens before and
+after, the number of plan advances and two sample citations. Pass the reserve
+and the size of the system prompt to see what the prompt would actually reach
+against Pi's threshold.
 
 ## Test
 

@@ -7,10 +7,13 @@
 // by CONTEXT_BUDGET_CONFIG. Per-request stats go to CONTEXT_BUDGET_LOG when set.
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { budgetFor, type PiCompaction } from "./budget.ts";
+import { decideCompaction, type Preparation } from "./compact.ts";
 import { estimate } from "./config.ts";
+import type { Entry } from "./cut.ts";
 import { formatPin, seedScratch, stripPin } from "./pin.ts";
 import { plan, type PlanState, type Stats } from "./plan.ts";
-import { loadConfig, loadState, saveState, spillFor } from "./store.ts";
+import { loadConfig, loadPiCompaction, loadState, saveState, spillFor } from "./store.ts";
 import { deterministicSummary } from "./summary.ts";
 import { registerCtxCommand, registerPin, registerRecall } from "./tools.ts";
 
@@ -30,6 +33,10 @@ export default function (pi: ExtensionAPI) {
   let last: Stats | undefined;
   let lastSessionId: string | undefined;
   let lastWindow = 131072;
+  let piCompaction = loadPiCompaction(process.cwd());
+  let budget = budgetFor(cfg, lastWindow, piCompaction);
+  let cancelled = false;         // this extension cancelled the compaction Pi is reporting as failed
+  const warned = new Set<string>();
 
   const stateFor = (sessionId: string): PlanState => {
     let s = states.get(sessionId);
@@ -43,6 +50,7 @@ export default function (pi: ExtensionAPI) {
     const sessionId = ctx.sessionManager.getSessionId();
     lastSessionId = sessionId;
     states.set(sessionId, loadState(sessionId));
+    piCompaction = loadPiCompaction(ctx.cwd);
   });
 
   pi.on("context", (event, ctx) => {
@@ -52,17 +60,19 @@ export default function (pi: ExtensionAPI) {
       lastSessionId = sessionId;
       const window = ctx.model?.contextWindow ?? 131072;
       lastWindow = window;
+      budget = budgetFor(cfg, window, piCompaction);
       const state = stateFor(sessionId);
       const incoming = stripPin(event.messages as never[]);
       if (cfg.pin && seedScratch(state.scratch, incoming, cfg)) saveState(sessionId, state);
       let base = 0;
       try { base = estimate(ctx.getSystemPrompt(), cfg); } catch { /* not every context exposes it */ }
-      const { messages, stats } = plan(incoming, state, cfg, window, spillFor(sessionId), base);
+      const { messages, stats } = plan(incoming, state, budget.cfg, window, spillFor(sessionId), base);
       last = stats;
       if (stats.advanced) saveState(sessionId, state);
       if (process.env.CONTEXT_BUDGET_LOG) {
         const elided = Object.values(state.elided).map((e) => `${e.id}:${e.step}:${e.tool}:${e.tokens}${e.path ? ":spilled" : ""}`);
-        appendFileSync(process.env.CONTEXT_BUDGET_LOG, JSON.stringify({ t: new Date().toISOString(), window, gen: state.gen, ...stats, elided }) + "\n");
+        const shape = { cap: Math.round(budget.cap), trigger: budget.trigger, clamped: budget.clamped };
+        appendFileSync(process.env.CONTEXT_BUDGET_LOG, JSON.stringify({ t: new Date().toISOString(), window, gen: state.gen, ...stats, ...shape, elided }) + "\n");
       }
       if (ctx.hasUI) {
         const pct = Math.round((100 * stats.ctxAfter) / window);
@@ -87,27 +97,47 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_before_compact", (event, ctx) => {
     if (!cfg.enabled || !cfg.interceptCompact) return;
-    if (event.signal?.aborted) return { cancel: true };
+    cancelled = false;
+    if (event.signal?.aborted) {
+      cancelled = true;
+      return { cancel: true };
+    }
     const sessionId = ctx.sessionManager.getSessionId();
     lastSessionId = sessionId;
     const state = stateFor(sessionId);
     const prep = event.preparation;
     try {
-      const summary = deterministicSummary({
-        messagesToSummarize: prep.messagesToSummarize as never[],
-        turnPrefixMessages: prep.turnPrefixMessages as never[],
-        previousSummary: prep.previousSummary,
-        fileOps: prep.fileOps,
-        tokensBefore: prep.tokensBefore,
+      const window = ctx.model?.contextWindow ?? lastWindow;
+      const b = budgetFor(cfg, window, (prep.settings as PiCompaction | undefined) ?? piCompaction);
+      const decision = decideCompaction({
+        prep: prep as unknown as Preparation,
+        entries: (event.branchEntries ?? []) as Entry[],
+        budget: b,
+        reason: event.reason,
+        state,
+        cfg,
         customInstructions: event.customInstructions,
-      }, state, cfg);
-      if (ctx.hasUI) ctx.ui.notify("context-budget: deterministic compaction (no LLM summary)", "info");
+      });
+      if (decision.cancel) {
+        cancelled = true;
+        if (ctx.hasUI && !warned.has(sessionId)) {
+          warned.add(sessionId);
+          ctx.ui.notify(
+            `context-budget: skipping compaction — it would free ~${decision.freed} tokens of the ${decision.need} needed to get ` +
+            `under Pi's threshold (${b.trigger} of a ${window}-token window). Lower compaction.keepRecentTokens or ` +
+            "reserveTokens in settings.json for this model; the plan keeps pruning the prompt meanwhile.",
+            "warning",
+          );
+        }
+        return { cancel: true };
+      }
+      if (ctx.hasUI) ctx.ui.notify(`context-budget: deterministic compaction (no LLM summary${decision.recut ? ", cut resized to the window" : ""})`, "info");
       return {
         compaction: {
-          summary,
-          firstKeptEntryId: prep.firstKeptEntryId,
+          summary: decision.summary,
+          firstKeptEntryId: decision.firstKeptEntryId,
           tokensBefore: prep.tokensBefore,
-          details: { from: "context-budget", archived: Object.keys(state.elided).length, gen: state.gen },
+          details: { from: "context-budget", archived: Object.keys(state.elided).length, gen: state.gen, freed: decision.freed, recut: decision.recut },
         },
       };
     } catch (err) {
@@ -139,6 +169,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_compact_failed", (event, ctx) => {
     if (!cfg.enabled) return;
+    if (cancelled && event.aborted) {
+      cancelled = false;
+      return; // our own cancel, already explained
+    }
     const msg = event.errorMessage ?? "unknown";
     // Pi reports these for /compact on a session below keepRecentTokens; not a failure.
     if (/too small|Already compacted/i.test(msg)) return;
@@ -146,7 +180,7 @@ export default function (pi: ExtensionAPI) {
     if (ctx.hasUI) ctx.ui.notify(`context-budget: Pi compact failed: ${msg}`, "warning");
   });
 
-  const host = { cfg, stateFor, sessionIdOf, last: () => last, lastWindow: () => lastWindow };
+  const host = { cfg, stateFor, sessionIdOf, last: () => last, lastWindow: () => lastWindow, budget: () => budget };
   registerRecall(pi, host);
   if (cfg.pin) registerPin(pi, host);
   registerCtxCommand(pi, host);

@@ -19,9 +19,12 @@ import { emptyScratch, type Scratch } from "./pin.ts";
 
 export { DEFAULTS, estimate, mergeConfig, type Config } from "./config.ts";
 export * from "./archive.ts";
+export * from "./budget.ts";
+export * from "./compact.ts";
+export * from "./cut.ts";
 export * from "./pin.ts";
 export * from "./summary.ts";
-export { indexMessages, resultText, textOf, type Msg } from "./messages.ts";
+export { estimateMessages, indexMessages, resultText, textOf, type Msg } from "./messages.ts";
 
 export interface PlanState {
   elided: Record<string, Elided>; // keyed by toolCallId, "arg:<toolCallId>:<name>" or "think:<hash>"
